@@ -1,0 +1,207 @@
+import streamlit as sl
+from streamlit_option_menu import option_menu
+import easyocr
+from PIL import Image
+import pandas as pd
+import numpy as np
+import re
+import sqlite3
+
+# SQLite Connection Function
+def create_connection():
+    conn = sqlite3.connect('extracted_data.db')  # Connect to the SQLite database (or create it)
+    return conn
+
+# Create Table Function (if not exists)
+def create_table(conn):
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS extracted_info (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT,
+                        designation TEXT,
+                        company_name TEXT,
+                        contact TEXT,
+                        email TEXT,
+                        website TEXT,
+                        address TEXT,
+                        pincode TEXT
+                    )''')
+    conn.commit()
+
+# Insert Data into SQLite
+def insert_data(conn, data):
+    cursor = conn.cursor()
+    cursor.execute('''INSERT INTO extracted_info (name, designation, company_name, contact, email, website, address, pincode)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                   (data["NAME"], data["DESIGNATION"], data["COMPANY NAME"], data["CONTACT"],
+                    data["EMAIL"], data["WEBSITE"], data["ADDRESS"], data["PINCODE"]))
+    conn.commit()
+
+# Delete Data from SQLite
+def delete_data(conn, record_id):
+    cursor = conn.cursor()
+    cursor.execute('''DELETE FROM extracted_info WHERE id = ?''', (record_id,))
+    conn.commit()
+
+# Show All Records from SQLite
+def fetch_all_records(conn):
+    cursor = conn.cursor()
+    cursor.execute('''SELECT * FROM extracted_info''')
+    rows = cursor.fetchall()
+    return rows
+
+# Streamlit UI
+sl.set_page_config(page_title="OCR Data Extraction & Database Management", page_icon="📋")
+
+# Sidebar Navigation Menu
+with sl.sidebar:
+    selected_option = option_menu(
+        "OCR & Database Management",
+        options=["Upload Image", "Insert Data", "View Database", "Delete Data"],
+        icons=["image", "pencil-square", "database", "trash"],
+        menu_icon="cast", default_index=0
+    )
+
+# Sidebar Content: Insert Data Manually
+if selected_option == "Insert Data":
+    sl.title("Insert Data into Database")
+
+    # Form for Manual Data Entry
+    with sl.form(key='insert_form'):
+        name = sl.text_input('Name')
+        designation = sl.text_input('Designation')
+        company_name = sl.text_input('Company Name')
+        contact = sl.text_input('Contact')
+        email = sl.text_input('Email')
+        website = sl.text_input('Website')
+        address = sl.text_input('Address')
+        pincode = sl.text_input('Pincode')
+
+        submit_button = sl.form_submit_button(label='Insert Data')
+
+        if submit_button:
+            data = {
+                "NAME": name,
+                "DESIGNATION": designation,
+                "COMPANY NAME": company_name,
+                "CONTACT": contact,
+                "EMAIL": email,
+                "WEBSITE": website,
+                "ADDRESS": address,
+                "PINCODE": pincode
+            }
+
+            conn = create_connection()
+            create_table(conn)  # Ensure table exists
+            insert_data(conn, data)  # Insert the data into the database
+            conn.close()
+            sl.success("Data inserted successfully!")
+
+# Sidebar Content: Upload Image for OCR Extraction
+if selected_option == "Upload Image":
+    sl.title("Upload an Image for OCR Data Extraction")
+
+    img = sl.file_uploader("Upload an image here", type=['jpg', 'png', 'jpeg'])
+
+    if img is not None:
+        pil_img = Image.open(img)
+        sl.image(pil_img)
+        img_arr = np.array(pil_img)
+
+        reader = easyocr.Reader(['en'], gpu=True)
+        text = reader.readtext(img_arr, detail=0)
+        sl.write("Extracted Text:")
+        sl.write(text)
+
+        def extracted_text(texts):
+            # Ensure each category has only one value to insert into the database
+            ext_data = {
+                "NAME": None,
+                "DESIGNATION": None,
+                "COMPANY NAME": None,
+                "CONTACT": None,
+                "EMAIL": None,
+                "WEBSITE": None,
+                "ADDRESS": None,
+                "PINCODE": None
+            }
+
+            if texts:
+                ext_data["NAME"] = texts[0]  # Assign the first text item as NAME
+                ext_data["DESIGNATION"] = texts[1]  # Assign the second item as DESIGNATION
+
+                pincode_pattern = r'\b\d{6}\b'  # For extracting pin codes
+
+                # Loop through the remaining text to categorize it
+                for i in range(2, len(texts)):
+                    if texts[i].startswith("+") or (texts[i].replace("-", "").isdigit() and '-' in texts[i]):
+                        ext_data["CONTACT"] = texts[i]  # Capture the contact number
+                    elif "@" in texts[i] and ".com" in texts[i]:
+                        ext_data["EMAIL"] = texts[i]  # Capture the email address
+                    elif "www" in texts[i] or "WWW" in texts[i] or "Www" in texts[i] or "wWw" in texts[i] or "wwW" in texts[i]:
+                        small = texts[i].lower()
+                        ext_data["WEBSITE"] = small  # Capture the website address
+                    elif re.search(pincode_pattern, texts[i]):
+                        pincode = re.search(pincode_pattern, texts[i]).group()
+                        ext_data["PINCODE"] = pincode  # Capture pin code
+                    elif re.match(r'^[A-Za-z]', texts[i]):
+                        ext_data["COMPANY NAME"] = texts[i]  # Capture company name
+                    else:
+                        remove_colon = re.sub(r'[,;]', '', texts[i])
+                        ext_data["ADDRESS"] = remove_colon  # Capture address
+
+            # Connect to SQLite and insert data
+            conn = create_connection()
+            create_table(conn)  # Ensure table exists
+            insert_data(conn, ext_data)  # Insert extracted data into the table
+            conn.close()
+
+            sl.write("Extracted Data:")
+            sl.write(ext_data)  # Display extracted data in the app
+
+        extracted_text(text)
+
+# Sidebar Content: View Database
+if selected_option == "View Database":
+    sl.title("View All Records from Database")
+
+    conn = create_connection()
+    create_table(conn)  # Ensure table exists
+    all_records = fetch_all_records(conn)  # Fetch all records from the database
+
+    # Create a DataFrame for better display
+    df = pd.DataFrame(all_records, columns=["ID", "Name", "Designation", "Company", "Contact", "Email", "Website", "Address", "Pincode"])
+    sl.write("Database Records:")
+    sl.dataframe(df)
+
+# Sidebar Content: Delete Data
+if selected_option == "Delete Data":
+    sl.title("Delete Data from Database")
+
+    # Input to enter the ID of the record to delete
+    record_to_delete = sl.number_input("Enter ID to delete record", min_value=1, step=1)
+
+    # Button to delete the record
+    delete_button = sl.button("Delete Record")
+
+    if delete_button and record_to_delete:
+        conn = create_connection()
+
+        # Delete record with the specified ID from the database
+        delete_data(conn, record_to_delete)
+
+        # Fetch all remaining records after deletion
+        remaining_records = fetch_all_records(conn)
+
+        if len(remaining_records) == 0:
+            sl.warning("No records left in the database.")
+        else:
+            sl.success(f"Record with ID {record_to_delete} deleted successfully!")
+
+            # Display remaining records
+            df_remaining = pd.DataFrame(remaining_records, columns=["ID", "Name", "Designation", "Company", "Contact", "Email", "Website", "Address", "Pincode"])
+            sl.write("Remaining Records in Database:")
+            sl.dataframe(df_remaining)
+
+        # Close the database connection
+        conn.close()
